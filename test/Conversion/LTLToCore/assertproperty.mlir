@@ -24,5 +24,15 @@ module {
     //CHECK:  hw.output
     hw.output 
   }
+
+  hw.module @AndLowering(in %a : i1, in %b : i1) {
+
+    // Create two 1-bit inputs and combine them with an LTL 'and'.
+    %and = ltl.and %a, %b : i1, i1
+
+  }
+  // CHECK-LABEL: hw.module @AndLowering(in %a : i1, in %b : i1)
+  // CHECK: %[[AND:.*]] = comb.and %a, %b : i1
+
 }
 

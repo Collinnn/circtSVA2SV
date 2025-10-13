@@ -88,9 +88,21 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     rewriter.replaceOpWithNewOp<comb::AndOp>(op, reg, notReset);
 
     return success();
-  }
-};
+    }
+  };
+  struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
+  using OpConversionPattern<ltl::AndOp>::OpConversionPattern;
 
+  LogicalResult
+  matchAndRewrite(ltl::AndOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Replace the LTL 'and' with a comb.and
+    auto result = rewriter.create<comb::AndOp>(
+        op.getLoc(), adaptor.getOperands()[0], adaptor.getOperands()[1]);
+    rewriter.replaceOp(op, result.getResult());
+    return success();
+    }
+  };
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -118,6 +130,7 @@ void LowerLTLToCorePass::runOnOperation() {
   target.addLegalDialect<ltl::LTLDialect>();
   target.addLegalDialect<verif::VerifDialect>();
   target.addIllegalOp<verif::HasBeenResetOp>();
+  target.addIllegalOp<ltl::AndOp>();
 
   // Create type converters, mostly just to convert an ltl property to a bool
   mlir::TypeConverter converter;
@@ -155,6 +168,7 @@ void LowerLTLToCorePass::runOnOperation() {
   // Create the operation rewrite patters
   RewritePatternSet patterns(&getContext());
   patterns.add<HasBeenResetOpConversion>(converter, patterns.getContext());
+  patterns.add<LTLAndOpConversion>(converter, patterns.getContext());
 
   // Apply the conversions
   if (failed(
