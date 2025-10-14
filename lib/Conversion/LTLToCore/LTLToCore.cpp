@@ -103,6 +103,36 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     return success();
     }
   };
+  struct LTLOrOpConversion : OpConversionPattern<ltl::OrOp> {
+    using OpConversionPattern<ltl::OrOp>::OpConversionPattern;
+
+    LogicalResult
+    matchAndRewrite(ltl::OrOp op, OpAdaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
+    // Replace the LTL 'or' with a comb.or
+    auto result = rewriter.create<comb::OrOp>(
+        op.getLoc(), adaptor.getOperands()[0], adaptor.getOperands()[1]);
+    rewriter.replaceOp(op, result.getResult());
+    return success();
+    }
+  };
+  struct LTLNotOpConversion : OpConversionPattern<ltl::NotOp> {
+    using OpConversionPattern<ltl::NotOp>::OpConversionPattern;
+
+    LogicalResult
+    matchAndRewrite(ltl::NotOp op, OpAdaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
+      Value operand = adaptor.getOperands()[0];
+      auto type = operand.getType();
+      auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), type, 1);
+      
+      // Replace the LTL 'not' with a comb.xor
+      auto result = rewriter.create<comb::XorOp>(
+          op.getLoc(), operand, constOne);
+      rewriter.replaceOp(op, result.getResult());
+      return success();
+    }
+  };
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -127,10 +157,10 @@ void LowerLTLToCorePass::runOnOperation() {
   target.addLegalDialect<comb::CombDialect>();
   target.addLegalDialect<sv::SVDialect>();
   target.addLegalDialect<seq::SeqDialect>();
-  target.addLegalDialect<ltl::LTLDialect>();
+  target.addIllegalDialect<ltl::LTLDialect>();
   target.addLegalDialect<verif::VerifDialect>();
   target.addIllegalOp<verif::HasBeenResetOp>();
-  target.addIllegalOp<ltl::AndOp>();
+
 
   // Create type converters, mostly just to convert an ltl property to a bool
   mlir::TypeConverter converter;
@@ -169,7 +199,8 @@ void LowerLTLToCorePass::runOnOperation() {
   RewritePatternSet patterns(&getContext());
   patterns.add<HasBeenResetOpConversion>(converter, patterns.getContext());
   patterns.add<LTLAndOpConversion>(converter, patterns.getContext());
-
+  patterns.add<LTLOrOpConversion>(converter, patterns.getContext());
+  patterns.add<LTLNotOpConversion>(converter, patterns.getContext());
   // Apply the conversions
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))

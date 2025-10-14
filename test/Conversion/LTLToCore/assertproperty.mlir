@@ -33,6 +33,19 @@ module {
   }
   // CHECK-LABEL: hw.module @AndLowering(in %a : i1, in %b : i1)
   // CHECK: %[[AND:.*]] = comb.and %a, %b : i1
+  
+  hw.module @OrLowering(in %a : i1, in %b : i1){
+    %or = ltl.or %a, %b : i1, i1
+  }
+  // CHECK-LABEL: hw.module @OrLowering(in %a : i1, in %b : i1)
+  // CHECK: %[[OR:.*]] = comb.or %a, %b : i1
 
+  hw.module @NotLowering(in %a : i1){
+    %not = ltl.not %a :i1
+  }
+
+  // CHECK-LABEL: hw.module @NotLowering(in %a : i1)
+  // CHECK: %[[True:.*]] = hw.constant true
+  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1
 }
 
