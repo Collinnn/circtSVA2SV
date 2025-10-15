@@ -125,10 +125,24 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       Value operand = adaptor.getOperands()[0];
       auto type = operand.getType();
       auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), type, 1);
-      
       // Replace the LTL 'not' with a comb.xor
       auto result = rewriter.create<comb::XorOp>(
           op.getLoc(), operand, constOne);
+      rewriter.replaceOp(op, result.getResult());
+      return success();
+    }
+  };
+  struct LTLImplication : OpConversionPattern<ltl::ImplicationOp> {
+    using OpConversionPattern<ltl::ImplicationOp>::OpConversionPattern;
+    LogicalResult
+    matchAndRewrite(ltl::ImplicationOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
+      Value lhs = adaptor.getOperands()[0];
+      Value rhs = adaptor.getOperands()[1];
+      auto type = lhs.getType();
+      auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), type, 1);
+      // Replace the LTL 'not' with a comb.xor
+      auto notOperator = rewriter.create<comb::XorOp>(op.getLoc(), lhs, constOne);
+      auto result = rewriter.create<comb::OrOp>(op.getLoc(), notOperator, rhs);
       rewriter.replaceOp(op, result.getResult());
       return success();
     }
@@ -201,6 +215,7 @@ void LowerLTLToCorePass::runOnOperation() {
   patterns.add<LTLAndOpConversion>(converter, patterns.getContext());
   patterns.add<LTLOrOpConversion>(converter, patterns.getContext());
   patterns.add<LTLNotOpConversion>(converter, patterns.getContext());
+  patterns.add<LTLImplication>(converter, patterns.getContext());
   // Apply the conversions
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))

@@ -42,10 +42,17 @@ module {
 
   hw.module @NotLowering(in %a : i1){
     %not = ltl.not %a :i1
+    %notltl = ltl.not %not : !ltl.property
   }
 
   // CHECK-LABEL: hw.module @NotLowering(in %a : i1)
   // CHECK: %[[True:.*]] = hw.constant true
   // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1
+  // CHECK: %[[True_0:.*]] = hw.constant true
+  // CHECK: %[[NOTLTL:.*]] = comb.xor %0, %true_0 : i1
+  
+  hw.module @Implication(in %a :i1, in %b : i1){
+    %implication = ltl.implication %a, %b : i1, i1
+  }
 }
 
