@@ -54,5 +54,16 @@ module {
   hw.module @Implication(in %a :i1, in %b : i1){
     %implication = ltl.implication %a, %b : i1, i1
   }
+  // CHECK-LABEL: hw.module @Implication(in %a : i1, in %b : i1)
+  // CHECK: %[[True:.*]] = hw.constant true
+  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1
+  // CHECK: %[[Or:.*]] = comb.or %0, %b : i1 
+  
+  hw.module @Clock(in %a : i1, in %clock : i1){
+    %newclock = ltl.clock %a, posedge %clock : i1
+  }
+  // CHECK-LABEL: hw.module @Clock(in %a : i1, in %clock : i1)
+  // CHECK: %[[Clock:.*]] = seq.to_clock %a
+
 }
 

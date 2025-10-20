@@ -28,6 +28,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/Casting.h"
+#include <iostream>
 
 namespace circt {
 #define GEN_PASS_DEF_LOWERLTLTOCORE
@@ -43,6 +45,18 @@ using namespace hw;
 //===----------------------------------------------------------------------===//
 
 namespace {
+  enum ClockEdge : uint8_t {
+    Pos,
+    Neg,
+    Both
+  };
+
+  struct ClockInfo {
+    Value seqClock;
+    ClockEdge edge;
+  };
+  ClockInfo clockInfo;
+
 struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
   using OpConversionPattern<verif::HasBeenResetOp>::OpConversionPattern;
 
@@ -147,8 +161,60 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       return success();
     }
   };
-} // namespace
+  struct LTLClock : OpConversionPattern<ltl::ClockOp> {
+    using OpConversionPattern<ltl::ClockOp>::OpConversionPattern;
 
+    LogicalResult
+    matchAndRewrite(ltl::ClockOp op, OpAdaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
+      auto clock = op.getOperands()[0];
+      //Not used
+      //auto sequence = op.getOperands()[1];
+      // If the clock is not already a seq.to_clock, create one
+      if (!isa<seq::ClockType>(clock.getType())) {
+        // Replace the LTL 'clock' with a seq.to_clock
+        auto result = rewriter.create<seq::ToClockOp>(
+            op.getLoc(), clock);
+        rewriter.replaceOp(op, result.getResult());
+        // Deep memory copy of the rewritten clock
+        clockInfo.seqClock = result.getResult();
+      }else{
+        clockInfo.seqClock = clock;
+        // remove the ltl.clock op
+        rewriter.removeOp(op);
+        
+      }
+      // Store the edge information
+      switch (op.getEdge()) {
+      case ltl::ClockEdge::Pos:
+        clockInfo.edge = ClockEdge::Pos;
+        break;
+      case ltl::ClockEdge::Neg:
+        clockInfo.edge = ClockEdge::Neg;
+        break;
+      case ltl::ClockEdge::Both:
+        clockInfo.edge = ClockEdge::Both;
+        break;
+      }
+      // Print debug information
+      llvm::errs() << "LTLClockOp converted: seqClock = " << clockInfo.seqClock
+                   << ", edge = " << static_cast<int>(clockInfo.edge) << "\n";
+      
+      return success();
+    }
+  };
+  struct LTLNextOpConversion : OpConversionPattern<ltl::DelayOp>{
+      using OpConversionPattern<ltl::DelayOp>::OpConversionPattern;
+
+      LogicalResult
+      matchAndRewrite(ltl::DelayOp op, OpAdaptor adaptor,
+                      ConversionPatternRewriter &rewriter) const override {
+       
+      return success();
+            
+    }
+  };
+}
 //===----------------------------------------------------------------------===//
 // Lower LTL To Core pass
 //===----------------------------------------------------------------------===//
@@ -216,6 +282,7 @@ void LowerLTLToCorePass::runOnOperation() {
   patterns.add<LTLOrOpConversion>(converter, patterns.getContext());
   patterns.add<LTLNotOpConversion>(converter, patterns.getContext());
   patterns.add<LTLImplication>(converter, patterns.getContext());
+  patterns.add<LTLClock>(converter, patterns.getContext());
   // Apply the conversions
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))
