@@ -47,7 +47,7 @@ module {
 
   // CHECK-LABEL: hw.module @NotLowering(in %a : i1)
   // CHECK: %[[True:.*]] = hw.constant true
-  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1
+  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1 
   // CHECK: %[[True_0:.*]] = hw.constant true
   // CHECK: %[[NOTLTL:.*]] = comb.xor %0, %true_0 : i1
   
@@ -60,10 +60,17 @@ module {
   // CHECK: %[[Or:.*]] = comb.or %0, %b : i1 
   
   hw.module @Clock(in %a : i1, in %clock : i1){
-    %newclock = ltl.clock %a, posedge %clock : i1
-  }
+    %newclock = ltl.clock %clock, posedge %a : i1
+  } 
   // CHECK-LABEL: hw.module @Clock(in %a : i1, in %clock : i1)
-  // CHECK: %[[Clock:.*]] = seq.to_clock %a
+  // CHECK: %[[Clock:.*]] = seq.to_clock %clock
+
+  hw.module @Delay(in %a : i1, in %clock : i1){
+    %newclock = ltl.clock %a, posedge %clock : i1
+    %delay = ltl.delay %a, 2,0 : i1
+  }
+  
+  
 
 }
 

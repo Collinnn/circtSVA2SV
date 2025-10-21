@@ -57,6 +57,7 @@ namespace {
   };
   ClockInfo clockInfo;
 
+
 struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
   using OpConversionPattern<verif::HasBeenResetOp>::OpConversionPattern;
 
@@ -167,51 +168,114 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     LogicalResult
     matchAndRewrite(ltl::ClockOp op, OpAdaptor adaptor,
                     ConversionPatternRewriter &rewriter) const override {
-      auto clock = op.getOperands()[0];
-      //Not used
-      //auto sequence = op.getOperands()[1];
-      // If the clock is not already a seq.to_clock, create one
+      Value clock = op.getOperands()[0];
+      Value seqClock;
       if (!isa<seq::ClockType>(clock.getType())) {
         // Replace the LTL 'clock' with a seq.to_clock
         auto result = rewriter.create<seq::ToClockOp>(
-            op.getLoc(), clock);
+            op.getLoc(), clock); 
         rewriter.replaceOp(op, result.getResult());
-        // Deep memory copy of the rewritten clock
-        clockInfo.seqClock = result.getResult();
+        seqClock = result.getResult();
       }else{
-        clockInfo.seqClock = clock;
+        
+        seqClock = clock;
         // remove the ltl.clock op
-        rewriter.removeOp(op);
+        rewriter.replaceOp(op, clock);
         
       }
       // Store the edge information
       switch (op.getEdge()) {
       case ltl::ClockEdge::Pos:
+        clockInfo.seqClock = seqClock;
         clockInfo.edge = ClockEdge::Pos;
         break;
       case ltl::ClockEdge::Neg:
+        clockInfo.seqClock = rewriter.create<seq::ClockInverterOp>(
+            op.getLoc(), clock);
         clockInfo.edge = ClockEdge::Neg;
         break;
       case ltl::ClockEdge::Both:
+        llvm::errs() << "Both edges not supported yet";
         clockInfo.edge = ClockEdge::Both;
         break;
       }
-      // Print debug information
-      llvm::errs() << "LTLClockOp converted: seqClock = " << clockInfo.seqClock
-                   << ", edge = " << static_cast<int>(clockInfo.edge) << "\n";
       
       return success();
     }
   };
-  struct LTLNextOpConversion : OpConversionPattern<ltl::DelayOp>{
+  struct LTLDelay : OpConversionPattern<ltl::DelayOp>{
       using OpConversionPattern<ltl::DelayOp>::OpConversionPattern;
 
       LogicalResult
       matchAndRewrite(ltl::DelayOp op, OpAdaptor adaptor,
                       ConversionPatternRewriter &rewriter) const override {
-       
+      //Get clock from struct
+      Value clock = clockInfo.seqClock;
+
+      // Ensure clock is seq::ClockType
+      if (!isa<seq::ClockType>(clock.getType())) {
+        llvm::errs() << "Clock provided to LTL Delay is not of seq::ClockType\n";
+        return failure();
+      }
+      
+      Value signal = adaptor.getOperands()[0];
+      Value data;
+      int64_t delay = op.getDelay();
+      std::optional<uint64_t> length = op.getLength();
+      if (!length.has_value()){
+        llvm::errs() << "Infinite length not supported yet\n";
+        return failure();
+      }else{
+        // Is the m in ##[n:m], can be zero
+        int64_t lengthValue = length.value();
+        auto depthAttr = rewriter.getI64IntegerAttr(lengthValue + delay);
+
+        //Reset signal for now is constantly 0
+        Value constZero = rewriter.create<hw::ConstantOp>(
+            op.getLoc(), signal.getType(), rewriter.getIntegerAttr(signal.getType(), 0));
+        Value constOne = rewriter.create<hw::ConstantOp>(
+            op.getLoc(), signal.getType(), rewriter.getIntegerAttr(signal.getType(), 1));¨
+          
+        // Control mask, sets bits from delay+1 to length+delay+1
+        uint64_t maskBits = ((1ULL << (lengthValue + delay + 1)) - 1) & ~((1ULL << delay) - 1);
+        auto shiftWidth = lengthValue + delay; // matches your ShiftReg depth
+        auto maskType = rewriter.getIntegerType(shiftWidth);
+        auto maskAttr = rewriter.getIntegerAttr(maskType, maskBits);
+        Value mask = rewriter.create<hw::ConstantOp>(op.getLoc(), maskAttr);
+
+        //Create the shift reg op
+        auto shiftReg = rewriter.create<seq::ShiftRegOp>(
+          op.getLoc(),
+          signal.getType(),                 // result type
+          depthAttr,                        // numElements (I64Attr)
+          signal,                           // input
+          clock,                            // clk
+          constOne,                         // clk en (always enabled)
+          rewriter.getStringAttr("ltl_delay_"), // optional name
+          Value(),                          // reset (none)
+          Value(),                          // resetValue (none)
+          constZero,                        // powerOnValue (constant)
+          hw::InnerSymAttr{}                // inner_sym
+        );
+        //Shift reg size, vs mask size
+        llvm::errs() << "ShiftReg size: " << shiftReg.getType() << "\n";
+        llvm::errs() << "Mask size: " << mask.getType() << "\n";
+        // Apply the mask on the output
+        Value masked = rewriter.create<comb::AndOp>(op.getLoc(), shiftReg, mask);
+
+        //Starts at zero
+        Value trigger = rewriter.create<hw::ConstantOp>(
+          op.getLoc(), rewriter.getIntegerType(1), rewriter.getIntegerAttr(rewriter.getIntegerType(1), 0));
+        
+        for (int i = delay; i < lengthValue + delay; i++){
+          Value bit = rewriter.create<comb::ExtractOp>(
+          op.getLoc(), rewriter.getIntegerType(1), masked, static_cast<uint32_t>(i));
+          trigger = rewriter.create<comb::OrOp>(op.getLoc() , trigger, bit);
+        }
+        rewriter.replaceOp(op, trigger);
+      }
+
       return success();
-            
     }
   };
 }
@@ -283,6 +347,7 @@ void LowerLTLToCorePass::runOnOperation() {
   patterns.add<LTLNotOpConversion>(converter, patterns.getContext());
   patterns.add<LTLImplication>(converter, patterns.getContext());
   patterns.add<LTLClock>(converter, patterns.getContext());
+  patterns.add<LTLDelay>(converter, patterns.getContext());
   // Apply the conversions
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))
