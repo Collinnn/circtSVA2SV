@@ -24,5 +24,58 @@ module {
     //CHECK:  hw.output
     hw.output 
   }
-}
 
+  hw.module @AndLowering(in %a : i1, in %b : i1) {
+
+    // Create two 1-bit inputs and combine them with an LTL 'and'.
+    %and = ltl.and %a, %b : i1, i1
+
+  }
+  // CHECK-LABEL: hw.module @AndLowering(in %a : i1, in %b : i1)
+  // CHECK: %[[AND:.*]] = comb.and %a, %b : i1
+  
+  hw.module @OrLowering(in %a : i1, in %b : i1){
+    %or = ltl.or %a, %b : i1, i1
+  }
+  // CHECK-LABEL: hw.module @OrLowering(in %a : i1, in %b : i1)
+  // CHECK: %[[OR:.*]] = comb.or %a, %b : i1
+
+  hw.module @NotLowering(in %a : i1){
+    %not = ltl.not %a :i1
+    %notltl = ltl.not %not : !ltl.property
+  }
+
+  // CHECK-LABEL: hw.module @NotLowering(in %a : i1)
+  // CHECK: %[[True:.*]] = hw.constant true
+  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1 
+  // CHECK: %[[True_0:.*]] = hw.constant true
+  // CHECK: %[[NOTLTL:.*]] = comb.xor %0, %true_0 : i1
+  
+  hw.module @Implication(in %a :i1, in %b : i1){
+    %implication = ltl.implication %a, %b : i1, i1
+  }
+  // CHECK-LABEL: hw.module @Implication(in %a : i1, in %b : i1)
+  // CHECK: %[[True:.*]] = hw.constant true
+  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1
+  // CHECK: %[[Or:.*]] = comb.or %0, %b : i1 
+  
+  hw.module @Clock(in %a : i1, in %clock : i1){
+    %newclock = ltl.clock %clock, posedge %a : i1
+  } 
+  // CHECK-LABEL: hw.module @Clock(in %a : i1, in %clock : i1)
+  // CHECK: %[[Clock:.*]] = seq.to_clock %clock
+
+  hw.module @Delay(in %a : i1, in %clock : i1){
+    %newclock = ltl.clock %clock, posedge %a : i1
+    %delay = ltl.delay %a, 2,0 : i1
+  }
+  // CHECK-LABEL: hw.module @Delay(in %a : i1, in %clock : i1)
+  // CHECK: %[[Clock:.*]] = seq.to_clock %clock
+  // CHECK: %[[False:.*]] = hw.constant false
+  // CHECK: %[[True:.*]] = hw.constant true
+  // CHECK: %[[DELAY_REG:.*]] = seq.shiftreg[2] %a, %0, %true powerOn %false : i1
+  
+  
+  
+
+}
