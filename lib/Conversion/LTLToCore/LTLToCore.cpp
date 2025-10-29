@@ -20,6 +20,7 @@
 #include "circt/Dialect/SV/SVOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/Verif/VerifOps.h"
+#include "circt/Dialect/Verif/VerifDialect.h"
 #include "circt/Support/BackedgeBuilder.h"
 #include "circt/Support/Namespace.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -45,17 +46,42 @@ using namespace hw;
 //===----------------------------------------------------------------------===//
 
 namespace {
-  enum ClockEdge : uint8_t {
-    Pos,
-    Neg,
-    Both
-  };
 
-  struct ClockInfo {
-    Value seqClock;
-    ClockEdge edge;
-  };
-  ClockInfo clockInfo;
+  llvm::DenseMap<Operation*, Value> opClockMap; 
+  
+  void createLocalClockMap(Value dataVal, Value clockVal) {
+    if (auto op = dataVal.getDefiningOp()) {
+      if (!opClockMap.count(op)) {
+        opClockMap[op] = clockVal; // Map the op once
+      }
+      // Recurse through operands
+      for (auto operand : op->getOperands()) {
+        createLocalClockMap(operand, clockVal);
+      }
+    }
+  }
+
+  int64_t getTotalDelay(mlir::Value val) {
+    if (!val)
+      return 0;
+    int total = 0;
+    if (auto *defOp = val.getDefiningOp()) {
+      if (auto delayOp = llvm::dyn_cast<circt::ltl::DelayOp>(defOp)) {
+        total += delayOp.getDelay() + getTotalDelay(delayOp.getOperand());
+      } else {
+        for (auto operand : defOp->getOperands()) {
+          total += getTotalDelay(operand);
+        }
+      }
+    }
+    return total;
+  }
+  Value getStartOfChain(mlir::Value val) {
+    if (auto *defOp = val.getDefiningOp()) {
+      return getStartOfChain(defOp->getOperand(0));
+    }
+    return val;
+  }
 
 
 struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
@@ -147,18 +173,93 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       return success();
     }
   };
+  struct verifClockedAssert : public OpConversionPattern<verif::ClockedAssertOp> {
+  using OpConversionPattern<verif::ClockedAssertOp>::OpConversionPattern;
+    LogicalResult
+    matchAndRewrite(verif::ClockedAssertOp op, OpAdaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
+      // Get the clock signal from the adaptor
+      Value clock = adaptor.getClock();
+      // Ensure clock is seq::ClockType
+      if (!isa<seq::ClockType>(clock.getType())) {
+        llvm::errs() << "Clock provided to ClockedAssert is not of seq::ClockType\n";
+        return failure();
+      }
+
+      switch (op.getEdge()) {
+        case verif::ClockEdge::Pos:
+          // No change needed, clock is already positive edge
+          break;
+        case verif::ClockEdge::Neg:
+          // Invert the clock for negative edge
+          clock = rewriter.create<seq::ClockInverterOp>(
+              op.getLoc(), clock);
+          break;
+        case verif::ClockEdge::Both:
+          llvm::errs() << "Both edges not supported\n";
+          return failure();
+      }
+
+      Value property = adaptor.getOperands()[0];
+      llvm::errs() << "Property is of the type:" << property.getType() << "\n";
+      // Add the signal to the map, which allows every function to look up the clock later
+      createLocalClockMap(property, clock);
+      auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 1);
+
+      rewriter.replaceOpWithNewOp<verif::AssertOp>(
+        op,
+        TypeRange{},        // no result types
+        property,           // property value
+        constOne,           // enable signal
+        op.getLabelAttr()  // optional label attr
+      );
+      return success();
+    }
+  };
   struct LTLImplication : OpConversionPattern<ltl::ImplicationOp> {
     using OpConversionPattern<ltl::ImplicationOp>::OpConversionPattern;
+
     LogicalResult
     matchAndRewrite(ltl::ImplicationOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const override {
+      
+      //Get RHS recursive tree search for all delay ops
+      int64_t rhsDelay = getTotalDelay(adaptor.getOperands()[1]);
+      Value rhsStart = getStartOfChain(adaptor.getOperands()[1]);
       Value lhs = adaptor.getOperands()[0];
       Value rhs = adaptor.getOperands()[1];
-      auto type = lhs.getType();
-      auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), type, 1);
+      auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), lhs.getType(), 1);
       // Replace the LTL 'not' with a comb.xor
       auto notOperator = rewriter.create<comb::XorOp>(op.getLoc(), lhs, constOne);
-      auto result = rewriter.create<comb::OrOp>(op.getLoc(), notOperator, rhs);
-      rewriter.replaceOp(op, result.getResult());
+
+      // TODO: DIRECT THIS TO THE START OF THE RHS CHAIN
+      auto result = rewriter.create<comb::OrOp>(op.getLoc(), notOperator, rhsStart);
+      Value constZero = rewriter.create<hw::ConstantOp>(op.getLoc(), lhs.getType(), 0);
+      if (rhsDelay == 0){
+        rewriter.replaceOp(op, result.getResult());
+        return success();
+      }
+      
+      Value clock = opClockMap[op.getOperation()];
+      if (!clock){
+        llvm::errs() << "No clock found for signal in LTL Implication\n";
+        return failure();
+      }
+      
+      auto shiftReg = rewriter.create<seq::ShiftRegOp>(
+          op.getLoc(),
+          rhs.getType(),                      // result type
+          rewriter.getI64IntegerAttr(rhsDelay),  // numElements (I64Attr)
+          lhs,                              // input
+          clock,                           // clk
+          constOne,                        // clk en (always enabled)
+          rewriter.getStringAttr("implication_reg"), // optional name
+          Value(),                          // reset (none)
+          Value(),                          // resetValue (none)
+          constZero, // powerOnValue (constant)
+          hw::InnerSymAttr{}                // inner_sym
+      );
+      auto andOp = rewriter.create<comb::AndOp>(op.getLoc(), shiftReg, rhs);
+      rewriter.replaceOp(op, andOp.getResult());
       return success();
     }
   };
@@ -172,37 +273,32 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       Value seqClock;
       if (!isa<seq::ClockType>(clock.getType())) {
         // Replace the LTL 'clock' with a seq.to_clock
-        auto result = rewriter.create<seq::ToClockOp>(
-            op.getLoc(), clock); 
+        auto result = rewriter.create<seq::ToClockOp>(op.getLoc(), clock); 
         rewriter.replaceOp(op, result.getResult());
         seqClock = result.getResult();
       }else{
-        
         seqClock = clock;
         // remove the ltl.clock op
-        rewriter.replaceOp(op, clock);
-        
+        rewriter.replaceOp(op, clock); 
       }
       // Store the edge information
       switch (op.getEdge()) {
       case ltl::ClockEdge::Pos:
-        clockInfo.seqClock = seqClock;
-        clockInfo.edge = ClockEdge::Pos;
+        createLocalClockMap(op.getResult(), seqClock);
         break;
       case ltl::ClockEdge::Neg:
-        clockInfo.seqClock = rewriter.create<seq::ClockInverterOp>(
-            op.getLoc(), clock);
-        clockInfo.edge = ClockEdge::Neg;
+        seqClock = rewriter.create<seq::ClockInverterOp>(
+            op.getLoc(), seqClock);
+        createLocalClockMap(op.getResult(), seqClock);
         break;
       case ltl::ClockEdge::Both:
-        llvm::errs() << "Both edges not supported yet";
-        clockInfo.edge = ClockEdge::Both;
+        llvm::errs() << "Both edges not supported";
         break;
       }
-      
       return success();
     }
   };
+
   struct LTLDelay : OpConversionPattern<ltl::DelayOp>{
       using OpConversionPattern<ltl::DelayOp>::OpConversionPattern;
 
@@ -210,7 +306,7 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       matchAndRewrite(ltl::DelayOp op, OpAdaptor adaptor,
                       ConversionPatternRewriter &rewriter) const override {
       //Get clock from struct
-      Value clock = clockInfo.seqClock;
+      Value clock = opClockMap[op.getOperation()];
 
       // Ensure clock is seq::ClockType
       if (!isa<seq::ClockType>(clock.getType())) {
@@ -220,31 +316,50 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       rewriter.setInsertionPoint(op);
 
       Value signal = adaptor.getOperands()[0];
-      Value data;
       int64_t delay = op.getDelay();
       std::optional<uint64_t> length = op.getLength();
       if (!length.has_value()){
-        llvm::errs() << "Infinite length not supported yet\n";
+        llvm::errs() << "Infinite length not supported\n";
         return failure();
       }else{
         // Is the m in ##[n:m], can be zero
         int64_t lengthValue = length.value();
+        // if length and delay is zero, no register needed it just a sequence
+        if (lengthValue == 0 && delay == 0){
+          rewriter.replaceOp(op, signal);
+          return success();
+        }
 
         //Reset signal for now is constantly 0
         Value constZero = rewriter.create<hw::ConstantOp>(
             op.getLoc(), signal.getType(), rewriter.getIntegerAttr(signal.getType(), 0));
         Value constOne = rewriter.create<hw::ConstantOp>(
             op.getLoc(), signal.getType(), rewriter.getIntegerAttr(signal.getType(), 1));
-          
-        // Control mask, sets bits from delay+1 to length+delay+1
 
-        auto depthAttr = rewriter.getI64IntegerAttr(delay);
+        auto users = op.getResult().getUsers();
+        Value userResult;
+        if (std::distance(users.begin(), users.end()) > 3){
+          llvm::errs() << "Delay op with multiple users not supported\n";
+          llvm::errs() << "Number of users: " << std::distance(users.begin(), users.end()) << "\n";
+          llvm::errs() << "Users:\n";
+          for (auto user : users){
+            llvm::errs() << " - " << *user << "\n";
+          }
+          return failure();
+        } else if (std::distance(users.begin(), users.end()) == 0){
+          // no users, always true
+          userResult = constOne;          
+          return success();
+        }else{
+          Operation *userOp = *(users.begin());
+          userResult = userOp->getResult(0);
+        }
         //Create the shift reg op
         auto shiftReg = rewriter.create<seq::ShiftRegOp>(
           op.getLoc(),
-          signal.getType(),                 // result type
-          depthAttr,                        // numElements (I64Attr)
-          signal,                           // input
+          rewriter.getI1Type(),                 // result type
+          rewriter.getI64IntegerAttr(delay),    // numElements (I64Attr)
+          userResult,                           // input
           clock,                            // clk
           constOne,                         // clk en (always enabled)
           rewriter.getStringAttr("delay_reg"), // optional name
@@ -257,10 +372,26 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
           llvm::errs() << "Variable delay not yet supported";
           return failure();
         }
+        //and Of orignal signal with value from shift reg
+        auto andOp = rewriter.create<comb::AndOp>(
+            op.getLoc(), shiftReg, signal);
 
-        rewriter.replaceOp(op, shiftReg);
+        rewriter.replaceOp(op, andOp.getResult());
       }
 
+      return success();
+    }
+  };
+  struct LTLConcatOpConversion : OpConversionPattern<ltl::ConcatOp> {
+    using OpConversionPattern<ltl::ConcatOp>::OpConversionPattern;
+
+    LogicalResult
+    matchAndRewrite(ltl::ConcatOp op, OpAdaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
+      // Replace the LTL 'concat' with a comb.concat
+      auto result = rewriter.create<comb::ConcatOp>(
+          op.getLoc(), adaptor.getOperands());
+      rewriter.replaceOp(op, result.getResult());
       return success();
     }
   };
@@ -280,18 +411,6 @@ struct LowerLTLToCorePass
 // Simply applies the conversion patterns defined above
 void LowerLTLToCorePass::runOnOperation() {
 
-  // Set target dialects: We don't want to see any ltl or verif that might
-  // come from an AssertProperty left in the result
-  ConversionTarget target(getContext());
-  target.addLegalDialect<hw::HWDialect>();
-  target.addLegalDialect<comb::CombDialect>();
-  target.addLegalDialect<sv::SVDialect>();
-  target.addLegalDialect<seq::SeqDialect>();
-  target.addIllegalDialect<ltl::LTLDialect>();
-  target.addLegalDialect<verif::VerifDialect>();
-  target.addIllegalOp<verif::HasBeenResetOp>();
-
-
   // Create type converters, mostly just to convert an ltl property to a bool
   mlir::TypeConverter converter;
 
@@ -306,34 +425,62 @@ void LowerLTLToCorePass::runOnOperation() {
 
   // Basic materializations
   converter.addTargetMaterialization(
-      [&](mlir::OpBuilder &builder, mlir::Type resultType,
-          mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
-        if (inputs.size() != 1)
-          return Value();
-        return builder
-            .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
-            ->getResult(0);
-      });
+    [&](mlir::OpBuilder &builder, mlir::Type resultType,
+      mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
+    if (inputs.size() != 1)
+      return Value();
+    return builder
+      .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
+      ->getResult(0);
+  });
 
   converter.addSourceMaterialization(
-      [&](mlir::OpBuilder &builder, mlir::Type resultType,
-          mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
-        if (inputs.size() != 1)
-          return Value();
-        return builder
-            .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
-            ->getResult(0);
-      });
+    [&](mlir::OpBuilder &builder, mlir::Type resultType,
+      mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
+    if (inputs.size() != 1)
+      return Value();
+    return builder
+      .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
+      ->getResult(0);
+  });
 
-  // Create the operation rewrite patters
+  ConversionTarget target(getContext());
+  target.addLegalDialect<hw::HWDialect>();
+  target.addLegalDialect<comb::CombDialect>();
+  target.addLegalDialect<sv::SVDialect>();
+  target.addLegalDialect<seq::SeqDialect>();
+  target.addLegalDialect<verif::VerifDialect>();
+  target.addIllegalOp<verif::ClockedAssertOp>();
+  target.addIllegalOp<ltl::ClockOp>();
+
+
+  RewritePatternSet clockpattern(&getContext());
+  clockpattern.add<verifClockedAssert>(converter, clockpattern.getContext());
+  clockpattern.add<LTLClock>(converter, clockpattern.getContext());
+  if (failed(
+      applyPartialConversion(getOperation(), target, std::move(clockpattern))))
+    return signalPassFailure();
+
+
+  RewritePatternSet earlypatterns(&getContext());
+  target.addIllegalOp<ltl::ImplicationOp>();
+  earlypatterns.add<LTLImplication>(converter, earlypatterns.getContext());
+
+  if (failed(
+      applyPartialConversion(getOperation(), target, std::move(earlypatterns))))
+    return signalPassFailure();
+
+
+  target.addIllegalDialect<ltl::LTLDialect>();
+  target.addIllegalOp<verif::HasBeenResetOp>();
+  
   RewritePatternSet patterns(&getContext());
   patterns.add<HasBeenResetOpConversion>(converter, patterns.getContext());
   patterns.add<LTLAndOpConversion>(converter, patterns.getContext());
   patterns.add<LTLOrOpConversion>(converter, patterns.getContext());
   patterns.add<LTLNotOpConversion>(converter, patterns.getContext());
-  patterns.add<LTLImplication>(converter, patterns.getContext());
-  patterns.add<LTLClock>(converter, patterns.getContext());
   patterns.add<LTLDelay>(converter, patterns.getContext());
+  patterns.add<LTLConcatOpConversion>(converter, patterns.getContext());
   // Apply the conversions
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))

@@ -75,7 +75,20 @@ module {
   // CHECK: %[[True:.*]] = hw.constant true
   // CHECK: %[[DELAY_REG:.*]] = seq.shiftreg[2] %a, %0, %true powerOn %false : i1
   
-  
-  
+  hw.module @Concat(in %a : i1, in %b : i1){
+    %concat = ltl.concat %a, %b : i1, i1
+    %concat2 = ltl.concat %a, %b, %a : i1 , i1 , i1
+  }
+  // CHECK-LABEL: hw.module @Concat(in %a : i1, in %b : i1)
+  // CHECK: %[[CONCAT:.*]] = comb.concat %a, %b : i1
+  // CHECK: %[[CONCAT2:.*]] = comb.concat %a, %b, %a : i1   
 
+  hw.module @ImplicationDelay(in %a : i1, in %b : i1, in %clock : i1) {
+    %newclock = ltl.clock %clock, posedge %a : i1
+    %delay1 = ltl.delay %a, 2,0 : i1
+    %1 = ltl.delay %delay1, 2, 0 : !ltl.sequence
+    %2 = ltl.delay %1, 2, 0 : !ltl.sequence
+    %res = ltl.implication %b, %1 : i1, !ltl.sequence
+
+  }
 }
