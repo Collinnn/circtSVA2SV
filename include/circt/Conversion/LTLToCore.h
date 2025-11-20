@@ -22,8 +22,9 @@
 namespace circt {
 
 #define GEN_PASS_DECL_LOWERLTLTOCORE
+#define GEN_PASS_DECL_LOWERVERIF
 #include "circt/Conversion/Passes.h.inc"
-
+std::unique_ptr<mlir::Pass> createLowerVerifPass();
 std::unique_ptr<mlir::Pass> createLowerLTLToCorePass();
 
 } // namespace circt

@@ -569,7 +569,19 @@ def ConvertHWToBTOR2 : Pass<"convert-hw-to-btor2", "mlir::ModuleOp"> {
 //===----------------------------------------------------------------------===//
 // LTLToCore
 //===----------------------------------------------------------------------===//
-
+def LowerVerif : Pass<"lower-verif", "hw::HWModuleOp"> {
+  let summary = "Convert Verif operations (e.g. ClockedAssertOp) to Core";
+  let description = [{
+    This pass converts Verif dialect ops to Core (hw/sv/comb/seq) operations.
+    Unlike `lower-ltl-to-core`, this pass only handles Verif ops and leaves LTL untouched,
+    so that it does not break other uses of the original pass.
+  }];
+  let constructor = "circt::createLowerVerifPass()";
+  let dependentDialects = [
+    "hw::HWDialect", "sv::SVDialect", "comb::CombDialect", "seq::SeqDialect",
+    "verif::VerifDialect"
+  ];
+}
 def LowerLTLToCore : Pass<"lower-ltl-to-core", "hw::HWModuleOp"> {
   let summary = "Convert LTL and Verif to Core";
   let description = [{
@@ -582,6 +594,7 @@ def LowerLTLToCore : Pass<"lower-ltl-to-core", "hw::HWModuleOp"> {
     "seq::SeqDialect"
   ];
 }
+
 
 //===----------------------------------------------------------------------===//
 // VerifToSV
