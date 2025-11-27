@@ -56,7 +56,7 @@ namespace {
     if (!v || !clockVal) return;
     // Already propagated
     if (clockMap.count(v)) return;
-
+    llvm::outs() << "Propagating clock for value: " << v << "\n";
     clockMap[v] = clockVal;
     // Propagate forward to all users
     for (auto *user : v.getUsers()) {
@@ -194,40 +194,6 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       return success();
     }
   };
-  /*
-  struct verifClockedAssert : public OpConversionPattern<verif::ClockedAssertOp> {
-    using OpConversionPattern<verif::ClockedAssertOp>::OpConversionPattern;
-    LogicalResult
-    matchAndRewrite(verif::ClockedAssertOp op, OpAdaptor adaptor,
-                    ConversionPatternRewriter &rewriter) const override {
-      // Get the clock signal from the adaptor
-      Value clock = adaptor.getClock();
-      // Ensure clock is seq::ClockType
-      if (!isa<seq::ClockType>(clock.getType())) {
-        auto result = rewriter.create<seq::ToClockOp>(op.getLoc(), clock); 
-        clock = result.getResult();
-      }
-      
-    if (op.getEdge() == verif::ClockEdge::Neg) {
-      // Invert the clock for negative edge
-      clock = rewriter.create<seq::ClockInverterOp>(
-          op.getLoc(), clock);
-    } else if (op.getEdge() == verif::ClockEdge::Both) {
-      llvm::errs() << "Both edges not supported\n";
-      return failure();
-    }
-
-      Value property = adaptor.getOperands()[0];
-
-      auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 1);
-      auto assertion = rewriter.create<verif::AssertOp>(op.getLoc(), property, constOne, op.getLabelAttrName());
-      llvm::outs() << op.getProperty();
-      propagateClock(op.getProperty(),clock);
-      rewriter.replaceOp(op,assertion);
-      return success();
-    }
-  };
-*/
   struct LTLImplication : OpConversionPattern<ltl::ImplicationOp> {
     using OpConversionPattern<ltl::ImplicationOp>::OpConversionPattern;
 
@@ -242,11 +208,13 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       Value constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), i1, 1);
       Value constZero = rewriter.create<hw::ConstantOp>(op.getLoc(), i1, 0);
 
-      Value lhsClock = clockMap.lookup(lhs);
-      Value rhsClock = clockMap.lookup(rhs);
+      Value ImplicationClock = clockMap[op];
+      Value lhsClock = clockMap[lhs];
+      Value rhsClock = clockMap[rhs];
+      llvm::outs() << "Implication Clock: " << ImplicationClock << "\n";
       Value clock = lhsClock ? lhsClock : rhsClock;
-      // As we are only expecting one clock, we don't care where it comes from
-      if (!lhsClock && !rhsClock){
+      clock = clock ? clock : ImplicationClock;
+      if (!clock){
         llvm::errs() << "No clock found for signal in LTL Implication\n" << clock << "\n";
         return failure();
       }
@@ -556,4 +524,3 @@ std::unique_ptr<mlir::Pass> circt::createLowerVerifPass() {
 std::unique_ptr<mlir::Pass> circt::createLowerLTLToCorePass() {
   return std::make_unique<LowerLTLToCorePass>();
 }
-
