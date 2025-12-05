@@ -569,7 +569,7 @@ def ConvertHWToBTOR2 : Pass<"convert-hw-to-btor2", "mlir::ModuleOp"> {
 //===----------------------------------------------------------------------===//
 // LTLToCore
 //===----------------------------------------------------------------------===//
-def LowerVerif : Pass<"lower-verif", "hw::HWModuleOp"> {
+def LowerVerif : Pass<"lower-verif", "mlir::ModuleOp"> {
   let summary = "Convert Verif operations (e.g. ClockedAssertOp) to Core";
   let description = [{
     This pass converts Verif dialect ops to Core (hw/sv/comb/seq) operations.

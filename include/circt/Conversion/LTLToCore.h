@@ -18,7 +18,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
-
+#include <memory>
 namespace circt {
 
 #define GEN_PASS_DECL_LOWERLTLTOCORE
