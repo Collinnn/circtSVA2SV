@@ -28,7 +28,8 @@ def transform(text):
     delay_match = re.match(r"(\s*%(\d+) = ltl\.delay )(%\d+), (\d*), (\d+)(.*)", line)
     clock_match = re.match(r"(\s*%[\w\d_]+ = ltl\.clock )(%[\w\d_]+), posedge (%\d+)(.*)", line)
     implication_match = re.match(r"(\s*%(\d+)\s*=\s*ltl\.implication )(%\d+), (%\d+)(.*)", line)
-    combinatorial_match = re.match(r"(\s*%(\d+)) = (moore)\.(and|or|not|xor) (%\d+), (%\d+)? : l1", line)
+    combinatorial_match = re.match(r"(\s*)%(\d+) = (moore)\.(and|or|xor) (%\d+), (%\d+)? : l1", line)
+    not_match = re.match(r"(\s*)%(\d+) = (moore)\.not (%\d+) : l1", line)
     if delay_match:
       indent, new_id, arg, delay, length, rest = delay_match.groups()
       if arg in ref_map:
@@ -62,7 +63,16 @@ def transform(text):
       if arg2 in ref_map:
         orignal2 = ref_map[arg2]
         arg2 = orignal2.split("_")[0]
-      line = f"{indent} = comb.{moore_op} {arg1}, {arg2} : i1"
+      if moore_op == "not":
+        line = f"{indent}%true = hw.constant true : i1"
+        line = f"{indent}%{new_id} = comb.xor {arg1}, %true : i1"
+    elif not_match:
+      indent, new_id, moore, arg1 = not_match.groups()
+      if arg1 in ref_map:
+        orignal1 = ref_map[arg1]
+        arg1 = orignal1.split("_")[0]
+      new_lines.append(f"{indent}%true = hw.constant 1 : i1")
+      line = f"{indent}%{new_id} = comb.xor {arg1}, %true : i1"
       
 
     new_lines.append(line)
