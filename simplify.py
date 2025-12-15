@@ -17,14 +17,18 @@ def transform(text):
     m = re.match(r"\s*(%\w+) = moore\.to_builtin_bool (%\w+) : l1", line)
     if m:
       temp, src = m.groups()
-      orignal = ref_map[src]
-      ref_map[temp] = orignal
+      if src in ref_map:
+        ref_map[temp] = ref_map[src]
+      
+      else: 
+        ref_map[temp] = src
       continue
         
     # Match ltl.delay lines
     delay_match = re.match(r"(\s*%(\d+) = ltl\.delay )(%\d+), (\d*), (\d+)(.*)", line)
     clock_match = re.match(r"(\s*%[\w\d_]+ = ltl\.clock )(%[\w\d_]+), posedge (%\d+)(.*)", line)
     implication_match = re.match(r"(\s*%(\d+)\s*=\s*ltl\.implication )(%\d+), (%\d+)(.*)", line)
+    combinatorial_match = re.match(r"(\s*%(\d+)) = (moore)\.(and|or|not|xor) (%\d+), (%\d+)? : l1", line)
     if delay_match:
       indent, new_id, arg, delay, length, rest = delay_match.groups()
       if arg in ref_map:
@@ -50,7 +54,17 @@ def transform(text):
         orignal2 = ref_map[arg2]
         arg2 = orignal2.split("_")[0]
       line = f"{indent}{arg1}, {arg2}{rest}"
-    
+    elif combinatorial_match:
+      indent, new_id, moore, moore_op, arg1, arg2 = combinatorial_match.groups()
+      if arg1 in ref_map:
+        orignal1 = ref_map[arg1]
+        arg1 = orignal1.split("_")[0]
+      if arg2 in ref_map:
+        orignal2 = ref_map[arg2]
+        arg2 = orignal2.split("_")[0]
+      line = f"{indent} = comb.{moore_op} {arg1}, {arg2} : i1"
+      
+
     new_lines.append(line)
 
   return "\n".join(new_lines)
@@ -83,6 +97,7 @@ def transform_module_signature(text):
             continue  # skip the closing brace
         
         if "moore." in line:
+          if not ("moore.and" in line or "moore.or" in line or "moore.not" in line or "moore.xor" in line):
             continue
 
         # If inside the block, remove one level of indentation (assume 1-2 spaces)

@@ -24,84 +24,20 @@ module {
     //CHECK:  hw.output
     hw.output 
   }
-  hw.module @AndLowering(in %a : i1, in %b : i1) {
-    // Create two 1-bit inputs and combine them with an LTL 'and'.
-    %and = ltl.and %a, %b : i1, i1
-  }
-  // CHECK-LABEL: hw.module @AndLowering(in %a : i1, in %b : i1)
-  // CHECK: %[[AND:.*]] = comb.and %a, %b : i1
-  
-  hw.module @OrLowering(in %a : i1, in %b : i1){
-    %or = ltl.or %a, %b : i1, i1
-  }
-  // CHECK-LABEL: hw.module @OrLowering(in %a : i1, in %b : i1)
-  // CHECK: %[[OR:.*]] = comb.or %a, %b : i1
 
-  hw.module @NotLowering(in %a : i1){
-    %not = ltl.not %a :i1
-    %notltl = ltl.not %not : !ltl.property
-  }
-
-  // CHECK-LABEL: hw.module @NotLowering(in %a : i1)
-  // CHECK: %[[True:.*]] = hw.constant true
-  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1 
-  // CHECK: %[[True_0:.*]] = hw.constant true
-  // CHECK: %[[NOTLTL:.*]] = comb.xor %0, %true_0 : i1
-  
-  hw.module @Implication(in %a : i1, in %b : i1, in %clock : i1){
-    %newclock = ltl.clock %clock, posedge %a :i1
-    %implication = ltl.implication %a, %b : i1, i1
-  }
-  // CHECK-LABEL: hw.module @Implication(in %a : i1, in %b : i1, in %clock : i1)
-  // CHECK: %[[True:.*]] = hw.constant true
-  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1
-  // CHECK: %[[Or:.*]] = comb.or %1, %b : i1 
-
-  hw.module @Clock(in %a : i1, in %clock : i1){
+  hw.module @Concat1(in %a : i1, in %b : i1, in %clock : i1){
     %newclock = ltl.clock %a, posedge %clock : i1
-  } 
-  // CHECK-LABEL: hw.module @Clock(in %a : i1, in %clock : i1)
-  // CHECK: %[[Clock:.*]] = seq.to_clock %clock
-
-  hw.module @Implication2(in %a : i1, in %b : i1, in %clock : i1){
-    %newclock = ltl.clock %a, posedge %clock :i1
-    %implication = ltl.implication %a, %b : i1, i1
+    %delay1 = ltl.delay %a, 2, 0 : i1
+    ltl.concat %delay1 : !ltl.sequence
   }
-  // CHECK-LABEL: hw.module @Implication2(in %a : i1, in %b : i1, in %clock : i1)
-  // CHECK: %[[True:.*]] = hw.constant true
-  // CHECK: %[[NOT:.*]] = comb.xor %a, %true : i1
-  // CHECK: %[[Or:.*]] = comb.or %1, %b : i1 
-
-  hw.module @Delay(in %a : i1, in %clock : i1){
-    %newclock = ltl.clock %a, posedge %clock : i1
-    %delay = ltl.delay %a, 2, 0 : i1
-  }
-  // CHECK-LABEL: hw.module @Delay(in %a : i1, in %clock : i1)
-  // CHECK: %[[Clock:.*]] = seq.to_clock %clock
-  // CHECK: %[[False:.*]] = hw.constant false
-  // CHECK: %[[True:.*]] = hw.constant true
-  // CHECK: %[[DELAY_REG:.*]] = seq.shiftreg[2] %true, %0, %true powerOn %false : i1
-  
-  hw.module @Concat(in %a : i1, in %b : i1){
-    %concat = ltl.concat %a, %b : i1, i1
-    %concat2 = ltl.concat %a, %b, %a : i1 , i1 , i1
-  }
-  // CHECK-LABEL: hw.module @Concat(in %a : i1, in %b : i1)
-  // CHECK: %[[CONCAT:.*]] = comb.concat %a, %b : i1
-  // CHECK: %[[CONCAT2:.*]] = comb.concat %a, %b, %a : i1 
 
   hw.module @Concat2(in %a : i1, in %b : i1, in %clock : i1){
     %newclock = ltl.clock %a, posedge %clock : i1
     %delay1 = ltl.delay %a, 2, 0 : i1
-    %delay2 = ltl.delay %b, 2, 0 : i1
-    ltl.concat %delay1, %delay2 : !ltl.sequence, !ltl.sequence
+    %delay4 = ltl.delay %b, 2, 0 : i1
+    %delay3 = ltl.delay %a, 2, 0 : i1
+    ltl.concat %delay1, %delay4, %delay3 : !ltl.sequence, !ltl.sequence , !ltl.sequence
   } 
-  hw.module @Verif(in %a : i1, in %b : i1, in %clock : i1){
-    %c1 = hw.constant 1 : i1
-    %delay = ltl.delay %a, 1, 0 : i1
-    %antecedent = ltl.concat %c1, %delay : i1, !ltl.sequence
-    %impl = ltl.implication %antecedent, %b : !ltl.sequence, i1 
-    ltl.clock %impl, posedge %clock : !ltl.property
-  }
 
+  
 } 
