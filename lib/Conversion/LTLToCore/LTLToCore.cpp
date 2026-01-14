@@ -57,23 +57,32 @@ namespace {
   Value leftMost;
   Value rhsStart;
 
-  //Assume Implication 
-  void findLeftMost(Value v){
-    if (!v)
-      return;
-    if (auto *defOp = v.getDefiningOp()) {
+  //Implication, find leftmost value and save it globally
+  //Only one implication is possible
+  Value findLeftMost(Value v){
+    while(auto *defOp = v.getDefiningOp()) {
       if (auto impOp = llvm::dyn_cast<ltl::ImplicationOp>(defOp)){
-        findLeftMost(impOp.getAntecedent());
+        v = (impOp.getAntecedent());
       }
       else if (auto concatOp = llvm::dyn_cast<ltl::ConcatOp>(defOp)){
-        leftMost = v;
+        v = concatOp.getInputs()[0];
       }
       else if (auto delayOp = llvm::dyn_cast<ltl::DelayOp>(defOp)){
-        leftMost = v;
-        return;
+        return v;
       }
-    }
-    return;
+      else if (auto andOp = llvm::dyn_cast<ltl::AndOp>(defOp)){
+        v = andOp.getOperands()[0];
+      }
+      else if (auto orOp = llvm::dyn_cast<ltl::OrOp>(defOp)){
+        v = orOp.getOperands()[0];
+      }
+      else if (auto unrealizedConversionCastOp = llvm::dyn_cast<UnrealizedConversionCastOp>(defOp)){
+        v = unrealizedConversionCastOp.getOperand(0);
+      } else{
+        return v;
+      }
+    }    
+    return v;
   }
   
   void propagateClock(Value v, Value clockVal) {
@@ -100,33 +109,17 @@ namespace {
     if (!val)
       return 0;
     if (auto *defOp = val.getDefiningOp()) {
-      if (auto delayOp = llvm::dyn_cast<ltl::DelayOp>(defOp))
+      if (auto delayOp = llvm::dyn_cast<ltl::DelayOp>(defOp)){
         return delayOp.getDelay() + getTotalDelay(delayOp.getOperand());
-
-    int64_t sum = 0;
-    for (auto operand : defOp->getOperands())
-      sum += getTotalDelay(operand);
-    return sum;
+      }
+      int64_t sum = 0;
+      for (auto operand : defOp->getOperands())
+        sum += getTotalDelay(operand);
+      return sum;
     }
     return 0;
   }
 
-  Value getStartOfChain(Value val) {
-    if (!val)
-      return Value();
-    if (isa<hw::InOutType>(val.getType()))
-      return val;
-    if (auto *defOp = val.getDefiningOp()) {
-      if(!isa<hw::InOutType>(defOp->getOperand(0).getType()))
-        return getStartOfChain(defOp->getOperand(0));
-    }
-    
-    if(!isa<IntegerType>(val.getType())){
-      val.setType(IntegerType::get(val.getContext(), 1));
-    }
-
-    return val;
-  }
 
 struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
   using OpConversionPattern<verif::HasBeenResetOp>::OpConversionPattern;
@@ -143,7 +136,6 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
 
     // Generate the constant used to negate the reset value
     Value constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), i1, 1);
-
 
     // Create a backedge for the register to be used in the OrOp
     circt::BackedgeBuilder bb(rewriter, op.getLoc());
@@ -176,7 +168,8 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     return success();
     }
   };
-  struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
+
+struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
   using OpConversionPattern<ltl::AndOp>::OpConversionPattern;
 
   LogicalResult
@@ -189,6 +182,7 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     return success();
     }
   };
+
   struct LTLOrOpConversion : OpConversionPattern<ltl::OrOp> {
     using OpConversionPattern<ltl::OrOp>::OpConversionPattern;
 
@@ -200,62 +194,6 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
         op.getLoc(), adaptor.getOperands()[0], adaptor.getOperands()[1]);
     rewriter.replaceOp(op, result.getResult());
     return success();
-    }
-  };
-  struct mooreAndOpConversion : OpConversionPattern<moore::AndOp> {
-    using OpConversionPattern<moore::AndOp>::OpConversionPattern;
-
-    LogicalResult
-    matchAndRewrite(moore::AndOp op, OpAdaptor adaptor,
-                    ConversionPatternRewriter &rewriter) const override {
-      // Replace the Moore 'and' with a comb.and
-      llvm::errs() << adaptor.getOperands()[0].getType() << "\n";
-      auto result = rewriter.create<comb::AndOp>(
-          op.getLoc(), adaptor.getOperands()[0], adaptor.getOperands()[1]);
-      rewriter.replaceOp(op, result.getResult());
-      return success();
-    }
-  };
-  struct mooreOrOpConversion : OpConversionPattern<moore::OrOp> {
-    using OpConversionPattern<moore::OrOp>::OpConversionPattern;
-    LogicalResult
-    matchAndRewrite(moore::OrOp op, OpAdaptor adaptor,
-                    ConversionPatternRewriter &rewriter) const override {
-      // Replace the Moore 'or' with a comb.or
-      auto result = rewriter.create<comb::OrOp>(
-          op.getLoc(), adaptor.getOperands()[0], adaptor.getOperands()[1]);
-      rewriter.replaceOp(op, result.getResult());
-      return success();
-    }
-  };
-
-  struct mooreXorOpConversion : OpConversionPattern<moore::XorOp> {
-    using OpConversionPattern<moore::XorOp>::OpConversionPattern;
-    LogicalResult
-    matchAndRewrite(moore::XorOp op, OpAdaptor adaptor,
-                    ConversionPatternRewriter &rewriter) const override {
-      // Replace the Moore 'xor' with a comb.xor
-      auto result = rewriter.create<comb::XorOp>(
-          op.getLoc(), adaptor.getOperands()[0], adaptor.getOperands()[1]);
-      rewriter.replaceOp(op, result.getResult());
-      return success();
-    }
-  };
-  struct mooreNotOpConversion : OpConversionPattern<moore::NotOp> {
-    using OpConversionPattern<moore::NotOp>::OpConversionPattern;
-
-    LogicalResult
-    matchAndRewrite(moore::NotOp op, OpAdaptor adaptor,
-                    ConversionPatternRewriter &rewriter) const override {
-      Value operand = adaptor.getOperands()[0];
-      auto i1 = rewriter.getI1Type();
-      Value constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), i1, 1);
-
-      // Replace the Moore 'not' with a comb.xor
-      auto result = rewriter.create<comb::XorOp>(
-          op.getLoc(), operand, constOne);
-      rewriter.replaceOp(op, result.getResult());
-      return success();
     }
   };
 
@@ -284,51 +222,51 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       Value rhs = adaptor.getConsequent();
       //Get RHS recursive tree search for all delay ops
       int64_t rhsDelay = getTotalDelay(rhs);
-      Value rhsStart = getStartOfChain(rhs);
       auto i1 = rewriter.getI1Type();
       Value constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), i1, 1);
 
-      
-
-      //TODO: CLEAN UP THE CLOCK LOOKUP
-      Value ImplicationClock = clockMap[op];
-      Value lhsClock = clockMap[lhs];
-      Value rhsClock = clockMap[rhs];
-      Value clock = lhsClock ? lhsClock : rhsClock;
-      clock = clock ? clock : ImplicationClock;
+      Value clock = clockMap[op];
       if (!clock){
         llvm::errs() << "No clock found for signal in LTL Implication\n" << clock << "\n";
         return failure();
       }
-      findLeftMost(op.getAntecedent());
 
-      Value notLhs = rewriter.create<comb::XorOp>(op.getLoc(),lhs,constOne);
-      Value rhsTrigger = rewriter.create<comb::OrOp>(op.getLoc(),notLhs,rhsStart);
-      rhsStart = rhsTrigger;
-      //ShiftReg can't be zero in length
+      //Handles if only one delay is shown
+      Value v = rhs;
+      while (auto cast = v.getDefiningOp<UnrealizedConversionCastOp>()) {
+        v = cast.getOperand(0);
+      }
+      // Now inspect the real defining op
+      if (auto delayOp = v.getDefiningOp<ltl::DelayOp>()) {
+        delayOp.getInputMutable().assign(lhs);
+      }
+      
+      Value curr = lhs;
+      //If Rhs has zero delays
       if (rhsDelay == 0){
-        rewriter.replaceOp(op,rhsTrigger);
+        auto notOp = rewriter.create<comb::XorOp>(op.getLoc(),rhs, constOne);
+        auto orOp = rewriter.create<comb::OrOp>(op.getLoc(), curr, notOp);
+        rewriter.replaceOp(op, orOp.getResult());
         return success();
       }
-      Value curr = rhsStart;
-      //Create the shift reg op
       for (int64_t i = 0; i < rhsDelay; i++){
         curr = rewriter.create<seq::CompRegOp>(
           op.getLoc(),
-          curr,   // input
-          clock   // clk
+          curr, // input
+          clock // clk
         );
       }
-      if(!isa<IntegerType>(rhs.getType()))
+      if(!isa<IntegerType>(rhs.getType())){
         rhs.setType(IntegerType::get(rhs.getContext(), 1));
-
-      auto andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr, rhs);
-      auto notOp = rewriter.create<comb::XorOp>(op.getLoc(),andOp.getResult(),constOne);
-      auto andOp2 = rewriter.create<comb::OrOp>(op.getLoc(),notOp,andOp.getResult());
-      rewriter.replaceOp(op, andOp2.getResult());
+      }
+      auto notOp = rewriter.create<comb::XorOp>(op.getLoc(),curr, constOne);
+      auto orOp = rewriter.create<comb::OrOp>(op.getLoc(), rhs, notOp);
+      rhsStart = rhs;
+      rewriter.replaceOp(op, orOp.getResult());
       return success();
     }
   };
+
   struct LTLClockOp : OpConversionPattern<ltl::ClockOp> {
     using OpConversionPattern<ltl::ClockOp>::OpConversionPattern;
     // In your OpConversionPattern<ltl::ClockOp>:
@@ -343,16 +281,19 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     if (op.getEdge() == ltl::ClockEdge::Neg) {
       // Invert the clock for negative edge
       clock = rewriter.create<seq::ClockInverterOp>(
-          op.getLoc(), clock);
+        op.getLoc(), clock);
     } else if (op.getEdge() == ltl::ClockEdge::Both) {
       llvm::errs() << "Both edges not supported\n";
       return failure();
     } 
+    //Find the leftmostValue
+    leftMost = findLeftMost(signal);
+    llvm::errs() << "Leftmost value is: " << leftMost << "\n";
 
-    Value setup = rewriter.create<hw::WireOp>(op.getLoc(),signal);
-    rewriter.replaceOp(op, setup);
+    rewriter.replaceOp(op, signal);
     propagateClock(op.getResult(),clock);
     propagateClock(op.getInput(),clock);
+
 
     if (!clock) {
       llvm::errs() << "No clock generated for LTL ClockOp\n";
@@ -384,10 +325,10 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     }
     // Is the m in ##[n:m], can be zero
     int64_t lengthValue = length.value();
-    // if length and delay is zero, no register needed it just a sequence
-    if (lengthValue == 0 && delay == 0){
-      rewriter.replaceOp(op, signal);
-      return success();
+
+    if (lengthValue != 0){
+      llvm::errs() << "Variable delay not yet supported";
+      return failure();
     }
     
     //Get clock from struct
@@ -396,22 +337,53 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
       llvm::errs() << "No clock attribute found on Delay op\n" << clock << "\n";
       return failure();
     }
-    Value curr = signal;
+    Value curr;
+    //Check if ltl.concat exists
+    if (auto concat = op.getResult().getDefiningOp<ltl::ConcatOp>()){
+      //Find this value in the concat op
+      for (size_t i = 0; i < concat.getInputs().size(); i++){
+        if (concat.getInputs()[i] == op.getResult()){
+          if (i == 0){
+            if (leftMost == op.getResult()){
+              curr = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 1);
+            }else{
+              llvm::errs( ) << "Leftmost value from other side of implication is" << rhsStart << "\n";
+              curr = rhsStart;
+            }
+          }else{
+            curr = concat.getInputs()[i-1];
+          }
+        }
+      }
+    }    
+    else{
+      curr = signal;
+
+      if (leftMost == op.getResult()){
+        auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 1); 
+        curr = constOne;
+      }else{
+        curr = rhsStart;
+      }
+      
+    }
+    // if length and delay is zero, no register needed it just a sequence
+    if (lengthValue == 0 && delay == 0){
+      auto andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr, signal);
+      rewriter.replaceOp(op, andOp.getResult());
+      return success();
+    }
     //Create the shift reg op
     for (int64_t i = 0; i < delay; i++){
-        curr = rewriter.create<seq::CompRegOp>(
-          op.getLoc(),
-          curr,                // input
-          clock               // clk
-        );
+      curr = rewriter.create<seq::CompRegOp>(
+        op.getLoc(),
+        curr, // input
+        clock // clk
+      );
     }
-    
-    if (lengthValue != 0){
-      llvm::errs() << "Variable delay not yet supported";
-      return failure();
-    }
+    auto andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr, signal);
 
-    rewriter.replaceOp(op, curr);
+    rewriter.replaceOp(op, andOp.getResult());
     return success();
     }
   };
@@ -428,45 +400,46 @@ struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
     auto i1 = rewriter.getI1Type();
     Value constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), i1, 1);
 
-    // --- backward pass ---
-    // Successor condition that the RIGHTMOST operand must satisfy
+    // Successor condition that the LEFTMOST operand must satisfy
     Value nextCond = constOne;
-
+    llvm::SmallVector<Value, 8> valueVec;
+    valueVec.resize(n);
     // Walk left to right
     for (int i = 0; i < n; i++) {
-
       Value in = inputs[i];
-
-      // Remove compreg layers so we get the starting signal
+      
       Value signal = in;
+      //Current DelayOp
       while(auto cast = signal.getDefiningOp<UnrealizedConversionCastOp>()){
         signal = cast.getOperand(0);
       }
-
-      if (i != 0){
-        Value lookback = inputs[i-1];
-        while(auto cast = lookback.getDefiningOp<UnrealizedConversionCastOp>()){
-          lookback = cast.getOperand(0);
+      valueVec[i] = signal;
+      while(auto andOp = signal.getDefiningOp<comb::AndOp>()){
+        signal = andOp.getInputs()[0];
+      }
+      Value compreg;
+      while(auto compRegOp = signal.getDefiningOp<seq::CompRegOp>()){
+        compreg = compRegOp;
+        signal = compRegOp.getInput();
+      }
+      if (i == 0){
+        if (leftMost == op.getInputs()[0]){
+          nextCond = constOne;
         }
-        nextCond = lookback.getDefiningOp<seq::CompRegOp>();
+        
+      }else{
+        if (auto compregOp = compreg.getDefiningOp<seq::CompRegOp>()){
+          compregOp->setOperand(0, valueVec[i-1]);
+        }else if(auto andOp = signal.getDefiningOp<comb::AndOp>()){
+          andOp->setOperand(0, valueVec[i-1]);
+        }
       }
-      seq::CompRegOp firstCompReg = nullptr;
-      while (auto cr = signal.getDefiningOp<seq::CompRegOp>()){
-        signal = cr.getInput();
-        firstCompReg = cr;
-      }
-      
-      // Each operand’s output condition is: signal AND nextCond
-      Value andOp = rewriter.create<comb::AndOp>(op.getLoc(), signal, nextCond);
-      firstCompReg->setOperand(0, andOp);
-
     }
-      nextCond = nextCond.getDefiningOp<seq::CompRegOp>();
-      // The whole concat op returns the last compreg condition
-      rewriter.replaceOp(op, nextCond);
-      return success();
+    rewriter.replaceOp(op, valueVec[n-1]);
+    return success();
     }
   };
+
   struct VerifAssertOpConversion : OpConversionPattern<verif::AssertOp> {
     using OpConversionPattern<verif::AssertOp>::OpConversionPattern;
 
@@ -559,12 +532,13 @@ void LowerLTLToCorePass::runOnOperation() {
   });
   // Convert Moore types from lowered System Verilog  
   converter.addConversion([](moore::IntType type){
-    return IntegerType::get(type.getContext(), 1);
+    return IntegerType::get(type.getContext(), type.getWidth());
   });
-  //Inout convertered to i1
+  //Inout type conversion
   converter.addConversion([](hw::InOutType type){
     return IntegerType::get(type.getContext(),1);
   });
+
 
   // Basic materializations
   converter.addTargetMaterialization(
@@ -572,6 +546,7 @@ void LowerLTLToCorePass::runOnOperation() {
       mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
     if (inputs.size() != 1)
       return Value();
+    
     return builder
       .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
       ->getResult(0);
@@ -597,10 +572,6 @@ void LowerLTLToCorePass::runOnOperation() {
 
   RewritePatternSet clockpattern(&getContext());
   clockpattern.add<LTLClockOp>(converter, clockpattern.getContext());
-  clockpattern.add<mooreAndOpConversion>(converter, clockpattern.getContext());
-  clockpattern.add<mooreOrOpConversion>(converter, clockpattern.getContext());
-  clockpattern.add<mooreXorOpConversion>(converter, clockpattern.getContext());
-  clockpattern.add<mooreNotOpConversion>(converter, clockpattern.getContext());
 
 
   if (failed(
@@ -647,9 +618,6 @@ void LowerLTLToCorePass::runOnOperation() {
   patterns.add<HasBeenResetOpConversion>(converter, patterns.getContext());
   patterns.add<VerifAssertOpConversion>(converter, patterns.getContext());
 
-
-  
-
   // Apply the conversions
   if (failed(
           applyPartialConversion(getOperation(), target, std::move(patterns))))
@@ -661,7 +629,6 @@ void LowerLTLToCorePass::runOnOperation() {
     casts.push_back(cast);
   });
   
-  llvm::errs() << "length is " << casts.size() << "\n";
   for (auto cast : casts){
     //If no users just erase
     if(cast->getUsers().empty()){
@@ -677,16 +644,12 @@ void LowerLTLToCorePass::runOnOperation() {
     // Replace all uses of the outermost cast with the original signal
     cast.getResult(0).replaceAllUsesWith(orignalSignal);
     cast.erase(); 
-      
-
   }
-  
-  }
+}
 // Basic default constructor
 std::unique_ptr<mlir::Pass> circt::createLowerVerifPass() {
   return std::make_unique<LowerVerifPass>();
 }
-
 
 std::unique_ptr<mlir::Pass> circt::createLowerLTLToCorePass() {
   return std::make_unique<LowerLTLToCorePass>();
