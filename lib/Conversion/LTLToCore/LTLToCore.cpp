@@ -56,9 +56,39 @@ namespace {
   //Implication specific
   Value leftMost;
   Value rhsStart;
+  Value rhsTrigger;
 
   //Implication, find leftmost value and save it globally
   //Only one implication is possible
+  Value findRightMost(Value v){
+    while(auto *defOp = v.getDefiningOp()) {
+      if (auto impOp = llvm::dyn_cast<ltl::ImplicationOp>(defOp)){
+        v = (impOp.getConsequent());
+      }
+      else if (auto concatOp = llvm::dyn_cast<ltl::ConcatOp>(defOp)){
+        v = concatOp.getInputs().back();
+      }
+      else if (auto delayOp = llvm::dyn_cast<ltl::DelayOp>(defOp)){
+        return v;
+      }
+      else if (auto andOp = llvm::dyn_cast<ltl::AndOp>(defOp)){
+        v = andOp.getOperands().back();
+      }
+      else if (auto orOp = llvm::dyn_cast<ltl::OrOp>(defOp)){
+        v = orOp.getOperands().back();
+      }
+      else if (auto clockOp = llvm::dyn_cast<ltl::ClockOp>(defOp)){
+        v = clockOp.getInput();
+      }
+      else if (auto unrealizedConversionCastOp = llvm::dyn_cast<UnrealizedConversionCastOp>(defOp)){
+        v = unrealizedConversionCastOp.getOperand(0);
+      } else{
+        return v;
+      }
+    }
+    return v;
+  }
+
   Value findLeftMost(Value v){
     while(auto *defOp = v.getDefiningOp()) {
       if (auto impOp = llvm::dyn_cast<ltl::ImplicationOp>(defOp)){
@@ -76,12 +106,15 @@ namespace {
       else if (auto orOp = llvm::dyn_cast<ltl::OrOp>(defOp)){
         v = orOp.getOperands()[0];
       }
+      else if (auto clockOp = llvm::dyn_cast<ltl::ClockOp>(defOp)){
+        v = clockOp.getInput();
+      }
       else if (auto unrealizedConversionCastOp = llvm::dyn_cast<UnrealizedConversionCastOp>(defOp)){
         v = unrealizedConversionCastOp.getOperand(0);
       } else{
         return v;
       }
-    }    
+    }
     return v;
   }
   
@@ -230,18 +263,8 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
         llvm::errs() << "No clock found for signal in LTL Implication\n" << clock << "\n";
         return failure();
       }
-
-      //Handles if only one delay is shown
-      Value v = rhs;
-      while (auto cast = v.getDefiningOp<UnrealizedConversionCastOp>()) {
-        v = cast.getOperand(0);
-      }
-      // Now inspect the real defining op
-      if (auto delayOp = v.getDefiningOp<ltl::DelayOp>()) {
-        delayOp.getInputMutable().assign(lhs);
-      }
-      
       Value curr = lhs;
+      
       //If Rhs has zero delays
       if (rhsDelay == 0){
         auto notOp = rewriter.create<comb::XorOp>(op.getLoc(),rhs, constOne);
@@ -261,8 +284,13 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
       }
       auto notOp = rewriter.create<comb::XorOp>(op.getLoc(),curr, constOne);
       auto orOp = rewriter.create<comb::OrOp>(op.getLoc(), rhs, notOp);
-      rhsStart = rhs;
+      rhsStart = findLeftMost(rhs);
+      rhsTrigger = findRightMost(lhs);
+      if (auto unrealizedOp = rhsStart.getDefiningOp<UnrealizedConversionCastOp>()){
+        rhsStart = unrealizedOp.getOperand(0);
+      }
       rewriter.replaceOp(op, orOp.getResult());
+
       return success();
     }
   };
@@ -281,20 +309,19 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
     if (op.getEdge() == ltl::ClockEdge::Neg) {
       // Invert the clock for negative edge
       clock = rewriter.create<seq::ClockInverterOp>(
-        op.getLoc(), clock);
+        op.getLoc(), result);
     } else if (op.getEdge() == ltl::ClockEdge::Both) {
       llvm::errs() << "Both edges not supported\n";
       return failure();
     } 
     //Find the leftmostValue
     leftMost = findLeftMost(signal);
-    llvm::errs() << "Leftmost value is: " << leftMost << "\n";
+    
+    
 
     rewriter.replaceOp(op, signal);
     propagateClock(op.getResult(),clock);
     propagateClock(op.getInput(),clock);
-
-
     if (!clock) {
       llvm::errs() << "No clock generated for LTL ClockOp\n";
       return failure();
@@ -323,6 +350,7 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
       llvm::errs() << "Infinite length not supported\n";
       return failure();
     }
+    llvm::errs() << "Signal is " << signal << "\n";
     // Is the m in ##[n:m], can be zero
     int64_t lengthValue = length.value();
 
@@ -337,56 +365,69 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
       llvm::errs() << "No clock attribute found on Delay op\n" << clock << "\n";
       return failure();
     }
-    Value curr;
-    //Check if ltl.concat exists
-    if (auto concat = op.getResult().getDefiningOp<ltl::ConcatOp>()){
+    Value curr = signal;
+
+    //Get the op that uses this delay op
+    Operation *user = *op.getResult().getUsers().begin();
+    if (isa<ltl::ConcatOp>(user)) {
+      auto concat = llvm::dyn_cast<ltl::ConcatOp>(user);
       //Find this value in the concat op
       for (size_t i = 0; i < concat.getInputs().size(); i++){
         if (concat.getInputs()[i] == op.getResult()){
           if (i == 0){
             if (leftMost == op.getResult()){
               curr = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 1);
+            }else if(rhsStart == op.getResult()){
+              curr = rhsTrigger;
             }else{
-              llvm::errs( ) << "Leftmost value from other side of implication is" << rhsStart << "\n";
-              curr = rhsStart;
+              llvm::errs() << "Error finding leftmost or rhsStart in DelayOp within ConcatOp\n";
+              return failure();
             }
           }else{
             curr = concat.getInputs()[i-1];
           }
         }
       }
-    }    
-    else{
-      curr = signal;
-
+    }else{
       if (leftMost == op.getResult()){
         auto constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 1); 
         curr = constOne;
+      }else if (rhsStart == op.getResult()){
+        curr = rhsTrigger;
       }else{
-        curr = rhsStart;
+        llvm::errs() << "Error finding leftmost or rhsStart in DelayOp\n";
+        return failure();
       }
-      
+    }
+
+    if (auto unrealizedOp = curr.getDefiningOp<UnrealizedConversionCastOp>()){
+      curr = findLeftMost(unrealizedOp.getOperand(0));
+    }
+    if (curr.getType() != rewriter.getI1Type()){
+      curr.setType(rewriter.getI1Type());
     }
     // if length and delay is zero, no register needed it just a sequence
-    if (lengthValue == 0 && delay == 0){
-      auto andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr, signal);
-      rewriter.replaceOp(op, andOp.getResult());
-      return success();
-    }
-    //Create the shift reg op
-    for (int64_t i = 0; i < delay; i++){
-      curr = rewriter.create<seq::CompRegOp>(
-        op.getLoc(),
-        curr, // input
-        clock // clk
-      );
+    if (delay != 0){
+      //Create the shift reg op
+      for (int64_t i = 0; i < delay; i++){
+        curr = rewriter.create<seq::CompRegOp>(
+          op.getLoc(),
+          curr, // input
+          clock // clk
+        );
+      }
     }
     auto andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr, signal);
-
-    rewriter.replaceOp(op, andOp.getResult());
+    auto result = andOp.getResult();
+    if (op.getResult() == rhsStart){
+      rhsStart = result;
+    }
+    
+    rewriter.replaceOp(op, result);
     return success();
     }
   };
+  
   struct LTLConcatOpConversion : OpConversionPattern<ltl::ConcatOp> {
     using OpConversionPattern<ltl::ConcatOp>::OpConversionPattern;
 
@@ -425,6 +466,8 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
       if (i == 0){
         if (leftMost == op.getInputs()[0]){
           nextCond = constOne;
+        }else{
+          nextCond = rhsTrigger;
         }
         
       }else{
