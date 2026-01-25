@@ -137,21 +137,40 @@ namespace {
     }
     return;
   }
+std::pair<int64_t, int64_t>
+getTotalDelayAndLength(Value val) {
+  if (!val)
+    return {0, 0};
 
-  int64_t getTotalDelay(Value val) {
-    if (!val)
-      return 0;
-    if (auto *defOp = val.getDefiningOp()) {
-      if (auto delayOp = llvm::dyn_cast<ltl::DelayOp>(defOp)){
-        return delayOp.getDelay() + getTotalDelay(delayOp.getOperand());
+  if (auto *defOp = val.getDefiningOp()) {
+
+    if (auto delayOp = llvm::dyn_cast<ltl::DelayOp>(defOp)) {
+      auto sub = getTotalDelayAndLength(delayOp.getOperand());
+
+      int64_t len = 0;
+      //If length is not specified, assume 0 for now (infinite lengths not supported)
+      if (!delayOp.getLength().has_value()){
+        len = delayOp.getLength().value();
       }
-      int64_t sum = 0;
-      for (auto operand : defOp->getOperands())
-        sum += getTotalDelay(operand);
-      return sum;
+      return {
+        delayOp.getDelay() + sub.first,
+        len + sub.second
+      };
     }
-    return 0;
+
+    int64_t totalDelay  = 0;
+    int64_t totalLength = 0;
+
+    for (auto operand : defOp->getOperands()) {
+      auto sub = getTotalDelayAndLength(operand);
+      totalDelay  += sub.first;
+      totalLength += sub.second;
+    }
+    return {totalDelay, totalLength};
   }
+  return {0, 0};
+}
+
 
 
 struct HasBeenResetOpConversion : OpConversionPattern<verif::HasBeenResetOp> {
@@ -254,7 +273,9 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
       Value lhs = adaptor.getAntecedent();
       Value rhs = adaptor.getConsequent();
       //Get RHS recursive tree search for all delay ops
-      int64_t rhsDelay = getTotalDelay(rhs);
+      auto pair = getTotalDelayAndLength(rhs);
+      int64_t rhsDelay = pair.first;
+      int64_t rhsLength = pair.second;
       auto i1 = rewriter.getI1Type();
       Value constOne = rewriter.create<hw::ConstantOp>(op.getLoc(), i1, 1);
 
@@ -264,7 +285,6 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
         return failure();
       }
       Value curr = lhs;
-      
       //If Rhs has zero delays
       if (rhsDelay == 0){
         auto notOp = rewriter.create<comb::XorOp>(op.getLoc(),rhs, constOne);
@@ -272,20 +292,50 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
         rewriter.replaceOp(op, orOp.getResult());
         return success();
       }
+
       for (int64_t i = 0; i < rhsDelay; i++){
         curr = rewriter.create<seq::CompRegOp>(
           op.getLoc(),
           curr, // input
           clock // clk
         );
+        if (i == 0){
+          auto compregOp = curr.getDefiningOp<seq::CompRegOp>();
+          rhsTrigger = compregOp.getInput();
+        }
+      }
+      if (rhsLength != 0){
+        Value notOp;
+        Value andOp;
+        Value acc = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 0);
+        for (int64_t i = 0; i < rhsLength; i++){
+          curr = rewriter.create<seq::CompRegOp>(
+            op.getLoc(),
+            curr, // input
+            clock // clk
+          );
+          if (i != rhsLength - 1){
+            //Stops further propagation
+            notOp = rewriter.create<comb::XorOp>(op.getLoc(),rhs, constTrue);
+            //Goes into the next  register
+            curr = rewriter.create<comb::AndOp>(op.getLoc(), curr, notOp);
+          }
+          andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr,rhs);
+          acc = rewriter.create<comb::OrOp>(op.getLoc(), andOp, acc);
+          if (i == rhsLength -1){
+            curr = acc;
+          }
+        }
       }
       if(!isa<IntegerType>(rhs.getType())){
         rhs.setType(IntegerType::get(rhs.getContext(), 1));
       }
       auto notOp = rewriter.create<comb::XorOp>(op.getLoc(),curr, constOne);
       auto orOp = rewriter.create<comb::OrOp>(op.getLoc(), rhs, notOp);
+      
       rhsStart = findLeftMost(rhs);
       rhsTrigger = findRightMost(lhs);
+      
       if (auto unrealizedOp = rhsStart.getDefiningOp<UnrealizedConversionCastOp>()){
         rhsStart = unrealizedOp.getOperand(0);
       }
@@ -350,15 +400,10 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
       llvm::errs() << "Infinite length not supported\n";
       return failure();
     }
-    llvm::errs() << "Signal is " << signal << "\n";
+
     // Is the m in ##[n:m], can be zero
     int64_t lengthValue = length.value();
 
-    if (lengthValue != 0){
-      llvm::errs() << "Variable delay not yet supported";
-      return failure();
-    }
-    
     //Get clock from struct
     Value clock = clockMap[op];
     if (!clock) {
@@ -417,8 +462,31 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
         );
       }
     }
+    Value result;
+    if (lengthValue != 0){
+      Value notOp;
+      Value andOp;
+      Value acc = rewriter.create<hw::ConstantOp>(op.getLoc(), rewriter.getI1Type(), 0);
+      for (int64_t i = 0; i < lengthValue; i++){
+        curr = rewriter.create<seq::CompRegOp>(
+          op.getLoc(),
+          curr, // input
+          clock // clk
+        );
+        if (i != lengthValue - 1){
+          //Stops further propagation
+          notOp = rewriter.create<comb::XorOp>(op.getLoc(),signal, constTrue);
+          //Goes into the next  register
+          curr = rewriter.create<comb::AndOp>(op.getLoc(), curr, notOp);
+        }
+        andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr,signal);
+        acc = rewriter.create<comb::OrOp>(op.getLoc(), andOp, acc);
+
+      }
+      result = acc;
+    }
     auto andOp = rewriter.create<comb::AndOp>(op.getLoc(), curr, signal);
-    auto result = andOp.getResult();
+    result = andOp.getResult();
     if (op.getResult() == rhsStart){
       rhsStart = result;
     }
@@ -448,7 +516,6 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
     // Walk left to right
     for (int i = 0; i < n; i++) {
       Value in = inputs[i];
-      
       Value signal = in;
       //Current DelayOp
       while(auto cast = signal.getDefiningOp<UnrealizedConversionCastOp>()){
@@ -464,17 +531,21 @@ struct LTLAndOpConversion : OpConversionPattern<ltl::AndOp> {
         signal = compRegOp.getInput();
       }
       if (i == 0){
+        //Only 2 possiblities
         if (leftMost == op.getInputs()[0]){
           nextCond = constOne;
         }else{
           nextCond = rhsTrigger;
         }
-        
       }else{
-        if (auto compregOp = compreg.getDefiningOp<seq::CompRegOp>()){
+        if (compreg != Value()){
+          auto compregOp = compreg.getDefiningOp<seq::CompRegOp>();
           compregOp->setOperand(0, valueVec[i-1]);
-        }else if(auto andOp = signal.getDefiningOp<comb::AndOp>()){
+        }else if(auto andOp = in.getDefiningOp<comb::AndOp>()){
           andOp->setOperand(0, valueVec[i-1]);
+        }else{
+          valueVec[i] = rewriter.create<comb::AndOp>(op.getLoc(), valueVec[i-1], valueVec[i]);
+          rhsTrigger = valueVec[i];
         }
       }
     }
